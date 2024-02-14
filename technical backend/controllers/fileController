@@ -1,0 +1,116 @@
+const multer = require("multer");
+const csv = require("csv-parser");
+const fs = require("fs");
+const mysql = require("mysql2/promise");
+const db = require("../database/database");
+
+exports.uploadFile = async (req, res) => {
+  try {
+    const storage = multer.memoryStorage();
+    const upload = multer({ storage }).single("file");
+
+    upload(req, res, async (err) => {
+      if (err) {
+        return res.status(500).json("An unknown error occurred");
+      }
+      const headers = [];
+      const rows = [];
+      //access file contents from memory
+      const csvData = req.file.buffer.toString(); 
+
+      //parse the CSV data
+      csvData
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== "")
+        .map((line) => line.split(",").map((cell) => cell.trim()))
+        .forEach((row, index) => {
+          if (index === 0) {
+            //to remove quotes from column names
+            headers.push(...row.map((header) => header.replace(/\"/g, ""))); 
+          } else {
+            //to remove quotes from cell values
+            const values = row.map((cell) => cell.replace(/\"/g, "")); 
+            rows.push(values);
+          }
+        });
+
+      const connection = await db.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        const createTableQuery = `CREATE TABLE IF NOT EXISTS details (${headers
+          .map((header) => `\`${header}\` VARCHAR(1000)`)
+          .join(", ")})`;
+        // const createTableQuery = `CREATE TABLE IF NOT EXISTS details (PostId INT, Id INT PRIMARY KEY, Name VARCHAR(255), Email VARCHAR(255), Body VARCHAR(1000))`;
+        await connection.query(createTableQuery);
+
+        const insertQuery = `INSERT INTO details (${headers
+          .map((header) => `\`${header}\``)
+          .join(", ")}) VALUES ?`;
+        // const insertQuery = `INSERT INTO details (PostId, Id, Name, Email, Body) VALUES ?`
+        await connection.query(insertQuery, [rows]);
+
+        await connection.commit();
+        connection.release();
+
+        res
+          .status(200)
+          .json({ message: "File uploaded and data inserted to database" });
+      } catch (error) {
+        await connection.rollback();
+        connection.release();
+        console.error("Error inserting data to database:", error);
+        res
+          .status(500)
+          .json({
+            error: "An error occurred while inserting data to database",
+          });
+      }
+    });
+  } catch (error) {
+    console.error("Error uploading file:", error);
+    res.status(500).json({ error: "An error occurred while uploading file" });
+  }
+};
+
+exports.getFileDetails = async (req, res) => {
+  try {
+    const connection = await db.getConnection();
+
+    // Check if the "details" table exists in the database
+    const [tableRows] = await connection.query("SHOW TABLES LIKE 'details'");
+
+    if (tableRows.length === 0) {
+      // If the "details" table does not exist, return a 404 response
+      return res.status(404).json({
+        success: false,
+        message: "The 'details' table does not exist in the database",
+      });
+    }
+
+    // If the "details" table exists, proceed with retrieving the data
+    const [rows, fields] = await connection.query("SELECT * FROM details");
+    if (rows.length > 0) {
+      console.log("Details loaded");
+      console.log("rows:", rows);
+      return res.status(200).json({
+        success: true,
+        message: "Details loaded",
+        results: rows,
+      });
+    } else {
+      console.log("No details found");
+      return res.status(200).json({
+        success: false,
+        message: "No details found",
+      });
+    }
+  } catch (error) {
+    console.error("Error getting file details:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve details",
+      error: error.message,
+    });
+  }
+};
